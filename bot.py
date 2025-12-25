@@ -1,0 +1,550 @@
+import discord
+from discord.ext import commands, tasks
+import asyncio
+from datetime import datetime, timedelta
+from collections import defaultdict
+import json
+import os
+
+# Bot configuration
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Data storage
+channel_deletion_times = defaultdict(list)  # {user_id: [timestamps]}
+member_joins = defaultdict(list)  # {guild_id: [timestamps]}
+custom_commands = {}  # {command_name: response}
+morning_channels = {}  # {guild_id: channel_id}
+morning_messages = {}  # {guild_id: custom_message}
+
+# Load custom commands from file
+COMMANDS_FILE = 'custom_commands.json'
+MORNING_FILE = 'morning_settings.json'
+
+def load_commands():
+    global custom_commands
+    if os.path.exists(COMMANDS_FILE):
+        with open(COMMANDS_FILE, 'r') as f:
+            custom_commands = json.load(f)
+
+def save_commands():
+    with open(COMMANDS_FILE, 'w') as f:
+        json.dump(custom_commands, f, indent=4)
+
+def load_morning_settings():
+    global morning_channels, morning_messages
+    if os.path.exists(MORNING_FILE):
+        with open(MORNING_FILE, 'r') as f:
+            data = json.load(f)
+            morning_channels = data.get('channels', {})
+            morning_messages = data.get('messages', {})
+
+def save_morning_settings():
+    with open(MORNING_FILE, 'w') as f:
+        json.dump({
+            'channels': morning_channels,
+            'messages': morning_messages
+        }, f, indent=4)
+
+load_commands()
+load_morning_settings()
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} has logged in!')
+    print(f'Bot is in {len(bot.guilds)} guilds')
+    await bot.change_presence(activity=discord.Game(name="Protecting your server!"))
+    # Start the morning message task
+    if not morning_message_task.is_running():
+        morning_message_task.start()
+
+# Anti-Nuke: Track channel deletions
+@bot.event
+async def on_guild_channel_delete(channel):
+    guild = channel.guild
+    # Try to get the audit log to find who deleted the channel
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
+            user = entry.user
+            if user and user != bot.user:
+                # Check if user is an admin
+                if user.guild_permissions.administrator:
+                    current_time = datetime.utcnow()
+                    user_id = user.id
+                    
+                    # Add current deletion time
+                    channel_deletion_times[user_id].append(current_time)
+                    
+                    # Remove deletions older than 60 seconds
+                    channel_deletion_times[user_id] = [
+                        t for t in channel_deletion_times[user_id]
+                        if current_time - t <= timedelta(seconds=60)
+                    ]
+                    
+                    # If 2 or more deletions within 60 seconds, ban the admin
+                    if len(channel_deletion_times[user_id]) >= 2:
+                        try:
+                            await guild.ban(user, reason="Anti-nuke: Deleted 2+ channels within 60 seconds")
+                            print(f"Banned {user} ({user_id}) for deleting 2+ channels within 60 seconds")
+                            
+                            # Send alert to a log channel (if exists)
+                            log_channel = discord.utils.get(guild.text_channels, name='mod-log')
+                            if not log_channel:
+                                log_channel = discord.utils.get(guild.text_channels, name='logs')
+                            
+                            if log_channel:
+                                embed = discord.Embed(
+                                    title="🚨 Anti-Nuke Protection",
+                                    description=f"**{user.mention}** has been banned for deleting 2+ channels within 60 seconds.",
+                                    color=discord.Color.red(),
+                                    timestamp=datetime.utcnow()
+                                )
+                                embed.add_field(name="User", value=f"{user} ({user_id})", inline=False)
+                                embed.add_field(name="Channels Deleted", value=len(channel_deletion_times[user_id]), inline=False)
+                                await log_channel.send(embed=embed)
+                            
+                            # Clear the tracking for this user
+                            channel_deletion_times[user_id] = []
+                        except discord.Forbidden:
+                            print(f"Could not ban {user} - insufficient permissions")
+                        except Exception as e:
+                            print(f"Error banning {user}: {e}")
+    except discord.Forbidden:
+        print("No permission to view audit logs")
+    except Exception as e:
+        print(f"Error checking audit logs: {e}")
+
+# Anti-Raid: Track member joins
+@bot.event
+async def on_member_join(member):
+    guild = member.guild
+    current_time = datetime.utcnow()
+    
+    # Add join time
+    member_joins[guild.id].append(current_time)
+    
+    # Remove joins older than 10 seconds
+    member_joins[guild.id] = [
+        t for t in member_joins[guild.id]
+        if current_time - t <= timedelta(seconds=10)
+    ]
+    
+    # If 5 or more joins within 10 seconds, it might be a raid
+    if len(member_joins[guild.id]) >= 5:
+        # Lock down the server temporarily
+        try:
+            # Find a log channel
+            log_channel = discord.utils.get(guild.text_channels, name='mod-log')
+            if not log_channel:
+                log_channel = discord.utils.get(guild.text_channels, name='logs')
+            
+            if log_channel:
+                embed = discord.Embed(
+                    title="⚠️ Possible Raid Detected",
+                    description=f"{len(member_joins[guild.id])} members joined within 10 seconds!",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.utcnow()
+                )
+                await log_channel.send(embed=embed)
+            
+            # Clear the tracking
+            member_joins[guild.id] = []
+        except Exception as e:
+            print(f"Error handling raid detection: {e}")
+
+# Anti-Raid: Detect mass mentions
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    
+    # Check for mass mentions (5+ mentions in one message)
+    if len(message.mentions) >= 5:
+        try:
+            await message.delete()
+            await message.channel.send(f"{message.author.mention}, mass mentions are not allowed!")
+            
+            # Warn or timeout the user
+            try:
+                await message.author.timeout(timedelta(minutes=10), reason="Mass mention spam")
+            except:
+                pass
+        except discord.Forbidden:
+            print("No permission to delete message or timeout user")
+        except Exception as e:
+            print(f"Error handling mass mention: {e}")
+    
+    # Check for spam (same message repeated 5+ times)
+    if message.guild:
+        channel = message.channel
+        count = 0
+        async for msg in channel.history(limit=10):
+            if msg.author == message.author and msg.content == message.content:
+                count += 1
+        
+        if count >= 5:
+            try:
+                await message.delete()
+                await message.channel.send(f"{message.author.mention}, spam is not allowed!")
+                try:
+                    await message.author.timeout(timedelta(minutes=10), reason="Spam")
+                except:
+                    pass
+            except discord.Forbidden:
+                print("No permission to delete spam message")
+            except Exception as e:
+                print(f"Error handling spam: {e}")
+    
+    # Process custom commands
+    if message.content.startswith('!'):
+        cmd_name = message.content.split()[0][1:].lower()
+        if cmd_name in custom_commands:
+            await message.channel.send(custom_commands[cmd_name])
+            return
+    
+    await bot.process_commands(message)
+
+# Custom Commands
+@bot.command(name='addcmd', aliases=['addcommand'])
+@commands.has_permissions(administrator=True)
+async def add_command(ctx, command_name: str, *, response: str):
+    """Add a custom command (Admin only)"""
+    command_name = command_name.lower()
+    if command_name in ['addcmd', 'delcmd', 'listcmd', 'help']:
+        await ctx.send("❌ This command name is reserved!")
+        return
+    
+    custom_commands[command_name] = response
+    save_commands()
+    await ctx.send(f"✅ Custom command `!{command_name}` has been added!")
+
+@bot.command(name='delcmd', aliases=['deletecommand', 'removecommand'])
+@commands.has_permissions(administrator=True)
+async def delete_command(ctx, command_name: str):
+    """Delete a custom command (Admin only)"""
+    command_name = command_name.lower()
+    if command_name in custom_commands:
+        del custom_commands[command_name]
+        save_commands()
+        await ctx.send(f"✅ Custom command `!{command_name}` has been deleted!")
+    else:
+        await ctx.send(f"❌ Command `!{command_name}` not found!")
+
+@bot.command(name='listcmd', aliases=['listcommands'])
+async def list_commands(ctx):
+    """List all custom commands"""
+    if not custom_commands:
+        await ctx.send("No custom commands have been added yet!")
+        return
+    
+    embed = discord.Embed(
+        title="Custom Commands",
+        description="\n".join([f"`!{cmd}`" for cmd in custom_commands.keys()]),
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
+
+# Utility Commands
+@bot.command(name='ping')
+async def ping(ctx):
+    """Check bot latency"""
+    latency = round(bot.latency * 1000)
+    await ctx.send(f"🏓 Pong! Latency: {latency}ms")
+
+@bot.command(name='info')
+async def info(ctx):
+    """Bot information"""
+    embed = discord.Embed(
+        title="🛡️ Anti-Raid & Anti-Nuke Bot",
+        description="Protecting your server from raids and nukes!",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Features", value="• Anti-Raid Protection\n• Anti-Nuke Protection\n• Custom Commands\n• Spam Detection", inline=False)
+    embed.add_field(name="Prefix", value="!", inline=True)
+    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    await ctx.send(embed=embed)
+
+@bot.command(name='clear')
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, amount: int = 10):
+    """Clear messages (Mod only)"""
+    if amount > 100:
+        amount = 100
+    try:
+        await ctx.channel.purge(limit=amount + 1)
+        await ctx.send(f"✅ Cleared {amount} messages!", delete_after=5)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to delete messages!")
+
+# Morning Message Commands
+@bot.command(name='setmorning', aliases=['morningchannel', 'setmorningchannel'])
+@commands.has_permissions(administrator=True)
+async def set_morning_channel(ctx, *, channel_input: str = None):
+    """Set the channel for morning messages (Admin only)
+    Usage: !setmorning [channel mention or channel name]
+    Example: !setmorning #general or !setmorning general
+    If no channel is specified, uses the current channel."""
+    try:
+        channel = None
+        
+        # If no input, use current channel
+        if channel_input is None:
+            channel = ctx.channel
+        else:
+            # Try to parse as channel mention or ID
+            channel_input = channel_input.strip()
+            
+            # Check if user is trying to set a message instead of a channel
+            # If the input is long or contains newlines, it's probably a message
+            if len(channel_input) > 50 or '\n' in channel_input or '@' in channel_input:
+                await ctx.send("❌ It looks like you're trying to set a morning message!\n"
+                              "Use `!setmorningmsg <your message>` to set the message.\n"
+                              "Use `!setmorning #channel` to set the channel.")
+                return
+            
+            # Remove # if present
+            if channel_input.startswith('#'):
+                channel_input = channel_input[1:]
+            
+            # Try to find channel by mention, ID, or name
+            # First, try to get from mentions
+            if ctx.message.channel_mentions:
+                channel = ctx.message.channel_mentions[0]
+            # Try to get by ID
+            elif channel_input.isdigit():
+                channel = bot.get_channel(int(channel_input))
+                if channel and channel.guild != ctx.guild:
+                    channel = None
+            # Try to get by name (exact match)
+            else:
+                channel = discord.utils.get(ctx.guild.text_channels, name=channel_input)
+            
+            # If still not found, try partial name match (case-insensitive)
+            if channel is None:
+                for ch in ctx.guild.text_channels:
+                    if channel_input.lower() in ch.name.lower():
+                        channel = ch
+                        break
+        
+        # Validate channel
+        if channel is None:
+            await ctx.send(f"❌ Channel not found! Please mention a channel (e.g., `!setmorning #general`) or use the channel name.")
+            return
+        
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.send("❌ Please specify a text channel!")
+            return
+        
+        # Save the channel
+        morning_channels[str(ctx.guild.id)] = channel.id
+        save_morning_settings()
+        await ctx.send(f"✅ Morning messages will be sent to {channel.mention}!")
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error setting morning channel: {e}")
+        print(f"Error in set_morning_channel: {e}")
+
+@bot.command(name='removemorning', aliases=['removemorningchannel'])
+@commands.has_permissions(administrator=True)
+async def remove_morning_channel(ctx):
+    """Remove morning messages for this server (Admin only)"""
+    if str(ctx.guild.id) in morning_channels:
+        del morning_channels[str(ctx.guild.id)]
+        if str(ctx.guild.id) in morning_messages:
+            del morning_messages[str(ctx.guild.id)]
+        save_morning_settings()
+        await ctx.send("✅ Morning messages have been disabled for this server!")
+    else:
+        await ctx.send("❌ Morning messages are not set for this server!")
+
+@bot.command(name='setmorningmsg', aliases=['morningmessage', 'custommorning'])
+@commands.has_permissions(administrator=True)
+async def set_morning_message(ctx, *, message: str = None):
+    """Set a custom morning message (Admin only). Leave empty to use default."""
+    guild_id = str(ctx.guild.id)
+    
+    if message is None:
+        if guild_id in morning_messages:
+            del morning_messages[guild_id]
+            save_morning_settings()
+            await ctx.send("✅ Morning message reset to default!")
+        else:
+            await ctx.send("❌ No custom message was set!")
+        return
+    
+    # Automatically set channel to current channel if not already set
+    if guild_id not in morning_channels:
+        morning_channels[guild_id] = ctx.channel.id
+        save_morning_settings()
+    
+    morning_messages[guild_id] = message
+    save_morning_settings()
+    await ctx.send(f"✅ Custom morning message set!\nPreview: {message}\n\n📌 Channel automatically set to {ctx.channel.mention}")
+
+@bot.command(name='morninginfo')
+async def morning_info(ctx):
+    """Check morning message settings"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in morning_channels:
+        # Check if message is set but channel is not
+        if guild_id in morning_messages:
+            await ctx.send("❌ Morning message is set, but no channel is configured!\n"
+                          f"Use `!setmorning #channel` or `!setmorning` to set the channel.\n"
+                          f"Or use `!setmorningmsg` again to automatically set this channel.")
+        else:
+            await ctx.send("❌ Morning messages are not configured for this server!\n"
+                          f"Use `!setmorning #channel` to set the channel first.")
+        return
+    
+    channel_id = morning_channels[guild_id]
+    channel = bot.get_channel(channel_id)
+    
+    embed = discord.Embed(
+        title="🌅 Morning Message Settings",
+        color=discord.Color.gold()
+    )
+    
+    if channel:
+        embed.add_field(name="Channel", value=channel.mention, inline=False)
+    else:
+        embed.add_field(name="Channel", value="Channel not found!", inline=False)
+    
+    if guild_id in morning_messages:
+        embed.add_field(name="Custom Message", value=morning_messages[guild_id], inline=False)
+    else:
+        embed.add_field(name="Custom Message", value="Using default message", inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='testmorning', aliases=['morningtest'])
+@commands.has_permissions(administrator=True)
+async def test_morning(ctx):
+    """Test the morning message (Admin only)"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in morning_channels:
+        # Check if message is set but channel is not
+        if guild_id in morning_messages:
+            await ctx.send("❌ Morning message is set, but no channel is configured!\n"
+                          f"Use `!setmorning #channel` or `!setmorning` to set the channel.\n"
+                          f"Or use `!setmorningmsg` again to automatically set this channel.")
+        else:
+            await ctx.send("❌ Morning messages are not configured for this server!\n"
+                          f"Use `!setmorning #channel` to set the channel first.")
+        return
+    
+    channel_id = morning_channels[guild_id]
+    channel = bot.get_channel(channel_id)
+    
+    if channel is None:
+        await ctx.send("❌ Morning message channel not found!")
+        return
+    
+    # Get custom message or use default
+    if guild_id in morning_messages:
+        message = morning_messages[guild_id]
+    else:
+        message = "🌅 Good morning everyone! Have a great day! 🌅"
+    
+    try:
+        await channel.send(f"@everyone {message}")
+        await ctx.send(f"✅ Test morning message sent to {channel.mention}!")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to send messages in that channel!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {e}")
+
+# Track which servers already received morning message today
+morning_sent_today = set()
+
+# Morning Message Task - Check every hour
+@tasks.loop(hours=1)
+async def morning_message_task():
+    """Send morning messages at 8:00 AM daily"""
+    await bot.wait_until_ready()
+    
+    now = datetime.now()
+    current_date = now.date()
+    
+    # Reset daily tracking at midnight
+    if now.hour == 0:
+        morning_sent_today.clear()
+    
+    # Send morning messages at 8 AM
+    if now.hour == 8 and now.minute < 1:
+        for guild_id_str, channel_id in morning_channels.items():
+            # Check if we already sent today
+            if guild_id_str in morning_sent_today:
+                continue
+                
+            try:
+                channel = bot.get_channel(channel_id)
+                if channel is None:
+                    continue
+                
+                guild_id = int(guild_id_str)
+                guild = bot.get_guild(guild_id)
+                if guild is None:
+                    continue
+                
+                # Get custom message or use default
+                if guild_id_str in morning_messages:
+                    message = morning_messages[guild_id_str]
+                else:
+                    message = "🌅 Good morning everyone! Have a great day! 🌅"
+                
+                # Send message with @everyone mention
+                await channel.send(f"@everyone {message}")
+                morning_sent_today.add(guild_id_str)
+                print(f"Sent morning message to {guild.name} in {channel.name}")
+            except discord.Forbidden:
+                print(f"No permission to send message in channel {channel_id}")
+            except Exception as e:
+                print(f"Error sending morning message: {e}")
+
+# Start the task when bot is ready
+@morning_message_task.before_loop
+async def before_morning_task():
+    await bot.wait_until_ready()
+    # Wait until the next hour starts
+    now = datetime.now()
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    wait_seconds = (next_hour - now).total_seconds()
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+
+# Error handling
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command!")
+    elif isinstance(error, commands.CommandNotFound):
+        pass  # Ignore command not found errors
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(f"❌ Invalid argument: {error}")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing required argument: {error}")
+    else:
+        print(f"Error: {error}")
+        # Send user-friendly error message
+        await ctx.send(f"❌ An error occurred: {str(error)}")
+
+# Run the bot
+if __name__ == "__main__":
+    # Get token from environment variable or config
+    TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+    if not TOKEN:
+        print("⚠️  Warning: DISCORD_BOT_TOKEN environment variable not set!")
+        print("Please set it or create a .env file with your token.")
+        TOKEN = input("Enter your Discord bot token: ").strip()
+    
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("❌ No token provided. Exiting...")
+
