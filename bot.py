@@ -268,6 +268,53 @@ async def info(ctx):
     embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
     await ctx.send(embed=embed)
 
+@bot.command(name='avatar', aliases=['av', 'pfp', 'profilepic'])
+async def avatar(ctx, member: discord.Member = None):
+    """Display a user's avatar
+    Usage: !avatar [user mention or user ID]
+    If no user is mentioned, shows your own avatar."""
+    # If no member is mentioned, use the command author
+    if member is None:
+        member = ctx.author
+    
+    # Get avatar URLs
+    avatar_url = member.display_avatar.url
+    has_server_avatar = member.guild_avatar is not None
+    has_global_avatar = member.avatar is not None
+    global_avatar_url = member.avatar.url if has_global_avatar else None
+    server_avatar_url = member.guild_avatar.url if has_server_avatar else None
+    
+    # Create embed
+    embed = discord.Embed(
+        title=f"{member.display_name}'s Avatar",
+        color=member.color if member.color.value != 0 else discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
+    
+    # Set the embed image to the avatar
+    embed.set_image(url=avatar_url)
+    
+    # Add user information
+    embed.add_field(name="User", value=f"{member.mention} ({member})", inline=False)
+    embed.add_field(name="User ID", value=member.id, inline=True)
+    
+    # Add avatar URL as a clickable link
+    embed.add_field(name="Avatar URL", value=f"[Click here]({avatar_url})", inline=False)
+    
+    # Show both server and global avatars if they're different
+    if has_server_avatar and has_global_avatar and server_avatar_url != global_avatar_url:
+        embed.add_field(name="Server Avatar", value=f"[Click here]({server_avatar_url})", inline=True)
+        embed.add_field(name="Global Avatar", value=f"[Click here]({global_avatar_url})", inline=True)
+    elif has_server_avatar and not has_global_avatar:
+        embed.add_field(name="Server Avatar", value=f"[Click here]({server_avatar_url})", inline=False)
+    elif has_global_avatar:
+        embed.add_field(name="Global Avatar", value=f"[Click here]({global_avatar_url})", inline=False)
+    
+    # Set footer with timestamp
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
+    
+    await ctx.send(embed=embed)
+
 @bot.command(name='clear')
 @commands.has_permissions(manage_messages=True)
 async def clear(ctx, amount: int = 10):
