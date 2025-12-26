@@ -411,11 +411,16 @@ async def remove_morning_channel(ctx):
 
 @bot.command(name='setmorningmsg', aliases=['morningmessage', 'custommorning'])
 @commands.has_permissions(administrator=True)
-async def set_morning_message(ctx, *, message: str = None):
-    """Set a custom morning message (Admin only). Leave empty to use default."""
+async def set_morning_message(ctx, *, input_text: str = None):
+    """Set a custom morning message (Admin only)
+    Usage: !setmorningmsg [channel] <message>
+    Examples:
+    - !setmorningmsg Hello everyone!
+    - !setmorningmsg #general Hello everyone!
+    - !setmorningmsg (empty) - Reset to default message"""
     guild_id = str(ctx.guild.id)
     
-    if message is None:
+    if input_text is None or input_text.strip() == "":
         if guild_id in morning_messages:
             del morning_messages[guild_id]
             save_morning_settings()
@@ -424,14 +429,66 @@ async def set_morning_message(ctx, *, message: str = None):
             await ctx.send("❌ No custom message was set!")
         return
     
-    # Automatically set channel to current channel if not already set
-    if guild_id not in morning_channels:
+    input_text = input_text.strip()
+    channel = None
+    message = None
+    
+    # Check if a channel is mentioned at the start
+    if ctx.message.channel_mentions:
+        # Channel mentioned - extract channel and message
+        channel = ctx.message.channel_mentions[0]
+        # Remove channel mention from message
+        # Find the position after the channel mention
+        channel_mention_text = channel.mention
+        if input_text.startswith(channel_mention_text):
+            message = input_text[len(channel_mention_text):].strip()
+        else:
+            # Try to find and remove channel mention
+            message = input_text.replace(channel_mention_text, "", 1).strip()
+    else:
+        # Check if input starts with #channel-name pattern
+        parts = input_text.split(None, 1)
+        if len(parts) > 1 and parts[0].startswith('#'):
+            # Try to find channel by name
+            channel_name = parts[0][1:]  # Remove #
+            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name)
+            if channel:
+                message = parts[1] if len(parts) > 1 else ""
+            else:
+                # Not a valid channel, treat as message
+                message = input_text
+        else:
+            # No channel specified, use message as-is
+            message = input_text
+    
+    # Validate message
+    if not message or message.strip() == "":
+        await ctx.send("❌ Please provide a message! Usage: `!setmorningmsg [channel] <message>`")
+        return
+    
+    # Set channel if specified, otherwise use current or existing
+    if channel:
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.send("❌ Please specify a text channel!")
+            return
+        morning_channels[guild_id] = channel.id
+        save_morning_settings()
+    elif guild_id not in morning_channels:
+        # No channel set and none specified, use current channel
         morning_channels[guild_id] = ctx.channel.id
         save_morning_settings()
+        channel = ctx.channel
     
+    # Save the message
     morning_messages[guild_id] = message
     save_morning_settings()
-    await ctx.send(f"✅ Custom morning message set!\nPreview: {message}\n\n📌 Channel automatically set to {ctx.channel.mention}")
+    
+    # Get channel for display
+    if not channel:
+        channel_id = morning_channels[guild_id]
+        channel = bot.get_channel(channel_id) or ctx.channel
+    
+    await ctx.send(f"✅ Custom morning message set!\n**Preview:** {message}\n\n📌 **Channel:** {channel.mention}")
 
 @bot.command(name='morninginfo')
 async def morning_info(ctx):
