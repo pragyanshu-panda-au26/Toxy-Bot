@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import json
 import os
+import webserver
 
 # Bot configuration
 intents = discord.Intents.default()
@@ -591,7 +592,9 @@ if __name__ == "__main__":
         TOKEN = input("Enter your Discord bot token: ").strip()
     
     if TOKEN:
-        bot.run(TOKEN)
+        webserver.keep_alive()  # Start Flask server in background thread
+        bot.run(TOKEN)          # Then run Discord bot
     else:
         print("❌ No token provided. Exiting...")
+
 
