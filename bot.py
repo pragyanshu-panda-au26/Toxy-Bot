@@ -6,6 +6,7 @@ from collections import defaultdict
 import json
 import os
 import webserver
+import aiohttp
 
 # Bot configuration
 intents = discord.Intents.default()
@@ -692,11 +693,12 @@ async def before_morning_task():
 
 # Bump Channel Configuration
 BUMP_CHANNEL_ID = 1454191176264585308
+BUMP_COMMAND_ID = 947088344167366698  # Slash command ID for /bump
 
 # Bump Task - Runs every 2 hours
 @tasks.loop(hours=2)
 async def bump_task():
-    """Send /bump command to the specified channel every 2 hours"""
+    """Execute /bump slash command in the specified channel every 2 hours"""
     await bot.wait_until_ready()
     
     try:
@@ -705,13 +707,49 @@ async def bump_task():
             print(f"⚠️  Bump channel {BUMP_CHANNEL_ID} not found!")
             return
         
-        # Send the /bump command
-        await channel.send("/bump")
-        print(f"✅ Sent /bump command to channel {channel.name} (ID: {BUMP_CHANNEL_ID})")
+        guild = channel.guild
+        if guild is None:
+            print(f"⚠️  Channel {BUMP_CHANNEL_ID} is not in a guild!")
+            return
+        
+        # Execute the slash command using Discord's interaction API
+        url = f"https://discord.com/api/v10/interactions"
+        headers = {
+            "Authorization": f"Bot {bot.http.token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Create interaction payload for slash command
+        # BUMP_COMMAND_ID is the application ID of the bot that owns the /bump command
+        payload = {
+            "type": 2,  # APPLICATION_COMMAND
+            "application_id": str(BUMP_COMMAND_ID),
+            "guild_id": str(guild.id),
+            "channel_id": str(channel.id),
+            "data": {
+                "id": str(BUMP_COMMAND_ID),
+                "name": "bump",
+                "type": 1  # CHAT_INPUT
+            }
+        }
+        
+        # Use aiohttp to make the request
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as response:
+                if response.status == 204:
+                    print(f"✅ Executed /bump command in channel {channel.name} (ID: {BUMP_CHANNEL_ID})")
+                elif response.status == 401:
+                    print(f"❌ Authentication failed. Check bot token.")
+                elif response.status == 403:
+                    print(f"❌ Forbidden. Bot may not have permission to execute this command.")
+                else:
+                    response_text = await response.text()
+                    print(f"⚠️  Failed to execute /bump command. Status: {response.status}, Response: {response_text}")
+                    
     except discord.Forbidden:
-        print(f"❌ No permission to send messages in bump channel {BUMP_CHANNEL_ID}")
+        print(f"❌ No permission to execute commands in bump channel {BUMP_CHANNEL_ID}")
     except Exception as e:
-        print(f"❌ Error sending bump command: {e}")
+        print(f"❌ Error executing bump command: {e}")
 
 # Start the bump task when bot is ready
 @bump_task.before_loop
@@ -748,24 +786,5 @@ if __name__ == "__main__":
         bot.run(TOKEN)          # Then run Discord bot
     else:
         print("❌ No token provided. Exiting...")
-
-
-
-
-# # Run the bot
-# if __name__ == "__main__":
-#     # Get token from environment variable or config
-#     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-#     if not TOKEN:
-#         print("⚠️  Warning: DISCORD_BOT_TOKEN environment variable not set!")
-#         print("Please set it or create a .env file with your token.")
-#         TOKEN = input("Enter your Discord bot token: ").strip()
-    
-#     if TOKEN:
-#         webserver.keep_alive()  # Start Flask server in background thread
-#         bot.run(TOKEN)          # Then run Discord bot
-#     else:
-#         print("❌ No token provided. Exiting...")
-
 
 
