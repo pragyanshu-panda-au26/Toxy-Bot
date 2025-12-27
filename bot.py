@@ -282,41 +282,12 @@ async def avatar(ctx, member: discord.Member = None):
     if member is None:
         member = ctx.author
     
-    # Get avatar URLs
+    # Get avatar URL
     avatar_url = member.display_avatar.url
-    has_server_avatar = member.guild_avatar is not None
-    has_global_avatar = member.avatar is not None
-    global_avatar_url = member.avatar.url if has_global_avatar else None
-    server_avatar_url = member.guild_avatar.url if has_server_avatar else None
     
-    # Create embed
-    embed = discord.Embed(
-        title=f"{member.display_name}'s Avatar",
-        color=member.color if member.color.value != 0 else discord.Color.blue(),
-        timestamp=datetime.utcnow()
-    )
-    
-    # Set the embed image to the avatar
+    # Create simple embed with only the avatar image
+    embed = discord.Embed()
     embed.set_image(url=avatar_url)
-    
-    # Add user information
-    embed.add_field(name="User", value=f"{member.mention} ({member})", inline=False)
-    embed.add_field(name="User ID", value=member.id, inline=True)
-    
-    # Add avatar URL as a clickable link
-    embed.add_field(name="Avatar URL", value=f"[Click here]({avatar_url})", inline=False)
-    
-    # Show both server and global avatars if they're different
-    if has_server_avatar and has_global_avatar and server_avatar_url != global_avatar_url:
-        embed.add_field(name="Server Avatar", value=f"[Click here]({server_avatar_url})", inline=True)
-        embed.add_field(name="Global Avatar", value=f"[Click here]({global_avatar_url})", inline=True)
-    elif has_server_avatar and not has_global_avatar:
-        embed.add_field(name="Server Avatar", value=f"[Click here]({server_avatar_url})", inline=False)
-    elif has_global_avatar:
-        embed.add_field(name="Global Avatar", value=f"[Click here]({global_avatar_url})", inline=False)
-    
-    # Set footer with timestamp
-    embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
     
     await ctx.send(embed=embed)
 
