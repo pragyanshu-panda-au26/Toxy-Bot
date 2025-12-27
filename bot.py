@@ -62,6 +62,9 @@ async def on_ready():
     # Start the morning message task
     if not morning_message_task.is_running():
         morning_message_task.start()
+    # Start the bump task
+    if not bump_task.is_running():
+        bump_task.start()
 
 # Anti-Nuke: Track channel deletions
 @bot.event
@@ -327,6 +330,70 @@ async def clear(ctx, amount: int = 10):
         await ctx.send(f"✅ Cleared {amount} messages!", delete_after=5)
     except discord.Forbidden:
         await ctx.send("❌ I don't have permission to delete messages!")
+
+@bot.command(name='text', aliases=['send', 'say'])
+@commands.has_permissions(administrator=True)
+async def send_text(ctx, channel_input: str, *, message: str = None):
+    """Send a message to a specified channel (Admin only)
+    Usage: !text <channel name or mention> <message>
+    Examples:
+    - !text #general Hello everyone!
+    - !text general This is a test message
+    - !text 123456789012345678 Your message here"""
+    try:
+        channel = None
+        
+        # Check if channel is mentioned
+        if ctx.message.channel_mentions:
+            channel = ctx.message.channel_mentions[0]
+        else:
+            # Remove # if present
+            channel_input_clean = channel_input.strip()
+            if channel_input_clean.startswith('#'):
+                channel_input_clean = channel_input_clean[1:]
+            
+            # Try to get by ID
+            if channel_input_clean.isdigit():
+                channel = bot.get_channel(int(channel_input_clean))
+                if channel and channel.guild != ctx.guild:
+                    channel = None
+            # Try to get by name (exact match)
+            else:
+                channel = discord.utils.get(ctx.guild.text_channels, name=channel_input_clean)
+            
+            # If still not found, try partial name match (case-insensitive)
+            if channel is None:
+                for ch in ctx.guild.text_channels:
+                    if channel_input_clean.lower() in ch.name.lower():
+                        channel = ch
+                        break
+        
+        # Validate channel
+        if channel is None:
+            await ctx.send(f"❌ Channel not found! Please mention a channel (e.g., `!text #general Your message`) or use the channel name.")
+            return
+        
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.send("❌ Please specify a text channel!")
+            return
+        
+        # Check if message was provided
+        if message is None or message.strip() == "":
+            await ctx.send("❌ Please provide a message! Usage: `!text <channel> <message>`")
+            return
+        
+        # Send the message to the specified channel
+        try:
+            await channel.send(message)
+            await ctx.send(f"✅ Message sent to {channel.mention}!")
+        except discord.Forbidden:
+            await ctx.send(f"❌ I don't have permission to send messages in {channel.mention}!")
+        except Exception as e:
+            await ctx.send(f"❌ Error sending message: {e}")
+            
+    except Exception as e:
+        await ctx.send(f"❌ Error: {e}")
+        print(f"Error in send_text command: {e}")
 
 # Morning Message Commands
 @bot.command(name='setmorning', aliases=['morningchannel', 'setmorningchannel'])
@@ -623,6 +690,34 @@ async def before_morning_task():
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
 
+# Bump Channel Configuration
+BUMP_CHANNEL_ID = 1454191176264585308
+
+# Bump Task - Runs every 2 hours
+@tasks.loop(hours=2)
+async def bump_task():
+    """Send /bump command to the specified channel every 2 hours"""
+    await bot.wait_until_ready()
+    
+    try:
+        channel = bot.get_channel(BUMP_CHANNEL_ID)
+        if channel is None:
+            print(f"⚠️  Bump channel {BUMP_CHANNEL_ID} not found!")
+            return
+        
+        # Send the /bump command
+        await channel.send("/bump")
+        print(f"✅ Sent /bump command to channel {channel.name} (ID: {BUMP_CHANNEL_ID})")
+    except discord.Forbidden:
+        print(f"❌ No permission to send messages in bump channel {BUMP_CHANNEL_ID}")
+    except Exception as e:
+        print(f"❌ Error sending bump command: {e}")
+
+# Start the bump task when bot is ready
+@bump_task.before_loop
+async def before_bump_task():
+    await bot.wait_until_ready()
+
 # Error handling
 @bot.event
 async def on_command_error(ctx, error):
@@ -653,5 +748,24 @@ if __name__ == "__main__":
         bot.run(TOKEN)          # Then run Discord bot
     else:
         print("❌ No token provided. Exiting...")
+
+
+
+
+# # Run the bot
+# if __name__ == "__main__":
+#     # Get token from environment variable or config
+#     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+#     if not TOKEN:
+#         print("⚠️  Warning: DISCORD_BOT_TOKEN environment variable not set!")
+#         print("Please set it or create a .env file with your token.")
+#         TOKEN = input("Enter your Discord bot token: ").strip()
+    
+#     if TOKEN:
+#         webserver.keep_alive()  # Start Flask server in background thread
+#         bot.run(TOKEN)          # Then run Discord bot
+#     else:
+#         print("❌ No token provided. Exiting...")
+
 
 
