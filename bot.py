@@ -664,7 +664,43 @@ async def before_morning_task():
 
 # Bump Channel Configuration
 BUMP_CHANNEL_ID = 1454191176264585308
-BUMP_COMMAND_ID = 947088344167366698  # Slash command ID for /bump
+BUMP_APPLICATION_ID = 947088344167366698  # Application ID of the bot that owns /bump command
+
+# Cache for command ID to avoid fetching every time
+bump_command_id_cache = {}
+
+async def get_bump_command_id(guild_id):
+    """Fetch the actual command ID for /bump command"""
+    if guild_id in bump_command_id_cache:
+        return bump_command_id_cache[guild_id]
+    
+    try:
+        url = f"https://discord.com/api/v10/applications/{BUMP_APPLICATION_ID}/guilds/{guild_id}/commands"
+        headers = {
+            "Authorization": f"Bot {bot.http.token}",
+            "Content-Type": "application/json"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    commands = await response.json()
+                    # Find the /bump command
+                    for cmd in commands:
+                        if cmd.get("name") == "bump":
+                            command_id = cmd.get("id")
+                            bump_command_id_cache[guild_id] = command_id
+                            print(f"✅ Found /bump command ID: {command_id}")
+                            return command_id
+                    print(f"⚠️  /bump command not found in application commands")
+                    return None
+                else:
+                    response_text = await response.text()
+                    print(f"⚠️  Failed to fetch commands. Status: {response.status}, Response: {response_text}")
+                    return None
+    except Exception as e:
+        print(f"❌ Error fetching command ID: {e}")
+        return None
 
 # Bump Task - Runs every 2 hours
 @tasks.loop(hours=2)
@@ -683,6 +719,12 @@ async def bump_task():
             print(f"⚠️  Channel {BUMP_CHANNEL_ID} is not in a guild!")
             return
         
+        # Get the actual command ID
+        command_id = await get_bump_command_id(guild.id)
+        if command_id is None:
+            print(f"⚠️  Could not find /bump command ID. Skipping this run.")
+            return
+        
         # Execute the slash command using Discord's interaction API
         url = f"https://discord.com/api/v10/interactions"
         headers = {
@@ -691,14 +733,13 @@ async def bump_task():
         }
         
         # Create interaction payload for slash command
-        # BUMP_COMMAND_ID is the application ID of the bot that owns the /bump command
         payload = {
             "type": 2,  # APPLICATION_COMMAND
-            "application_id": str(BUMP_COMMAND_ID),
+            "application_id": str(BUMP_APPLICATION_ID),
             "guild_id": str(guild.id),
             "channel_id": str(channel.id),
             "data": {
-                "id": str(BUMP_COMMAND_ID),
+                "id": str(command_id),  # Use the actual command ID
                 "name": "bump",
                 "type": 1  # CHAT_INPUT
             }
@@ -713,6 +754,11 @@ async def bump_task():
                     print(f"❌ Authentication failed. Check bot token.")
                 elif response.status == 403:
                     print(f"❌ Forbidden. Bot may not have permission to execute this command.")
+                elif response.status == 400:
+                    response_text = await response.text()
+                    print(f"❌ Bad request. Response: {response_text}")
+                    print(f"   Note: Discord bots cannot directly execute other bots' slash commands.")
+                    print(f"   This is a Discord API limitation.")
                 else:
                     response_text = await response.text()
                     print(f"⚠️  Failed to execute /bump command. Status: {response.status}, Response: {response_text}")
