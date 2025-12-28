@@ -7,6 +7,7 @@ import json
 import os
 import webserver
 import aiohttp
+import pytz
 
 # Bot configuration
 intents = discord.Intents.default()
@@ -22,6 +23,8 @@ member_joins = defaultdict(list)  # {guild_id: [timestamps]}
 custom_commands = {}  # {command_name: response}
 morning_channels = {}  # {guild_id: channel_id}
 morning_messages = {}  # {guild_id: custom_message}
+welcome_channels = {}  # {guild_id: channel_id}
+welcome_messages = {}  # {guild_id: custom_message}
 
 # Load custom commands from file
 COMMANDS_FILE = 'custom_commands.json'
@@ -38,18 +41,22 @@ def save_commands():
         json.dump(custom_commands, f, indent=4)
 
 def load_morning_settings():
-    global morning_channels, morning_messages
+    global morning_channels, morning_messages, welcome_channels, welcome_messages
     if os.path.exists(MORNING_FILE):
         with open(MORNING_FILE, 'r') as f:
             data = json.load(f)
             morning_channels = data.get('channels', {})
             morning_messages = data.get('messages', {})
+            welcome_channels = data.get('welcome_channels', {})
+            welcome_messages = data.get('welcome_messages', {})
 
 def save_morning_settings():
     with open(MORNING_FILE, 'w') as f:
         json.dump({
             'channels': morning_channels,
-            'messages': morning_messages
+            'messages': morning_messages,
+            'welcome_channels': welcome_channels,
+            'welcome_messages': welcome_messages
         }, f, indent=4)
 
 load_commands()
@@ -160,6 +167,54 @@ async def on_member_join(member):
             member_joins[guild.id] = []
         except Exception as e:
             print(f"Error handling raid detection: {e}")
+    
+    # Send welcome message
+    try:
+        guild_id_str = str(guild.id)
+        channel_id = None
+        
+        # Check if welcome channel is configured for this guild
+        if guild_id_str in welcome_channels:
+            channel_id = welcome_channels[guild_id_str]
+        else:
+            # Check for direct channel ID (channel_ prefix) or use default
+            for key, ch_id in welcome_channels.items():
+                if key.startswith('channel_'):
+                    channel_id = ch_id
+                    break
+        
+        # If no channel found, use the default general channel ID
+        if channel_id is None:
+            channel_id = 1388945402333761698
+        
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            print(f"Welcome channel {channel_id} not found for guild {guild.name}")
+            return
+        
+        # Get custom welcome message or use default
+        if guild_id_str in welcome_messages:
+            message = welcome_messages[guild_id_str]
+        else:
+            message = f"Welcome to {guild.name}, {member.mention}! 🎉 We're glad to have you here!"
+        
+        # Create welcome embed
+        embed = discord.Embed(
+            title="👋 Welcome!",
+            description=message,
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Member", value=f"{member.mention} ({member})", inline=True)
+        embed.add_field(name="Member Count", value=guild.member_count, inline=True)
+        
+        await channel.send(embed=embed)
+        print(f"Sent welcome message for {member} in {channel.name}")
+    except discord.Forbidden:
+        print(f"No permission to send welcome message in channel {channel_id}")
+    except Exception as e:
+        print(f"Error sending welcome message: {e}")
 
 # Anti-Raid: Detect mass mentions
 @bot.event
@@ -603,27 +658,143 @@ async def test_morning(ctx):
     except Exception as e:
         await ctx.send(f"❌ Error: {e}")
 
+# Welcome Message Commands
+@bot.command(name='setwelcome', aliases=['welcomechannel', 'setwelcomechannel'])
+@commands.has_permissions(administrator=True)
+async def set_welcome_channel(ctx, *, channel_input: str = None):
+    """Set the channel for welcome messages (Admin only)
+    Usage: !setwelcome [channel mention or channel name]
+    Example: !setwelcome #general or !setwelcome general
+    If no channel is specified, uses the current channel."""
+    try:
+        channel = None
+        
+        # If no input, use current channel
+        if channel_input is None:
+            channel = ctx.channel
+        else:
+            # Try to parse as channel mention or ID
+            channel_input = channel_input.strip()
+            
+            # Remove # if present
+            if channel_input.startswith('#'):
+                channel_input = channel_input[1:]
+            
+            # Try to find channel by mention, ID, or name
+            if ctx.message.channel_mentions:
+                channel = ctx.message.channel_mentions[0]
+            elif channel_input.isdigit():
+                channel = bot.get_channel(int(channel_input))
+                if channel and channel.guild != ctx.guild:
+                    channel = None
+            else:
+                channel = discord.utils.get(ctx.guild.text_channels, name=channel_input)
+            
+            # If still not found, try partial name match (case-insensitive)
+            if channel is None:
+                for ch in ctx.guild.text_channels:
+                    if channel_input.lower() in ch.name.lower():
+                        channel = ch
+                        break
+        
+        # Validate channel
+        if channel is None:
+            await ctx.send(f"❌ Channel not found! Please mention a channel (e.g., `!setwelcome #general`) or use the channel name.")
+            return
+        
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.send("❌ Please specify a text channel!")
+            return
+        
+        # Save the channel
+        welcome_channels[str(ctx.guild.id)] = channel.id
+        save_morning_settings()
+        await ctx.send(f"✅ Welcome messages will be sent to {channel.mention}!")
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error setting welcome channel: {e}")
+        print(f"Error in set_welcome_channel: {e}")
+
+@bot.command(name='setwelcomemsg', aliases=['welcomemessage', 'customwelcome'])
+@commands.has_permissions(administrator=True)
+async def set_welcome_message(ctx, *, message: str = None):
+    """Set a custom welcome message (Admin only)
+    Usage: !setwelcomemsg <message>
+    Example: !setwelcomemsg Welcome to our server! Enjoy your stay!
+    Use {member} to mention the new member and {guild} for server name.
+    Leave empty to reset to default."""
+    guild_id = str(ctx.guild.id)
+    
+    if message is None or message.strip() == "":
+        if guild_id in welcome_messages:
+            del welcome_messages[guild_id]
+            save_morning_settings()
+            await ctx.send("✅ Welcome message reset to default!")
+        else:
+            await ctx.send("❌ No custom message was set!")
+        return
+    
+    # Save the message
+    welcome_messages[guild_id] = message.strip()
+    save_morning_settings()
+    
+    # Get channel for display
+    channel_id = welcome_channels.get(guild_id, 1388945402333761698)
+    channel = bot.get_channel(channel_id) or ctx.channel
+    
+    await ctx.send(f"✅ Custom welcome message set!\n**Preview:** {message.strip()}\n\n📌 **Channel:** {channel.mention if hasattr(channel, 'mention') else 'Default channel'}")
+
+@bot.command(name='welcomeinfo')
+async def welcome_info(ctx):
+    """Check welcome message settings"""
+    guild_id = str(ctx.guild.id)
+    
+    channel_id = welcome_channels.get(guild_id, 1388945402333761698)
+    channel = bot.get_channel(channel_id)
+    
+    embed = discord.Embed(
+        title="👋 Welcome Message Settings",
+        color=discord.Color.green()
+    )
+    
+    if channel:
+        embed.add_field(name="Channel", value=channel.mention, inline=False)
+    else:
+        embed.add_field(name="Channel", value=f"Channel ID: {channel_id}", inline=False)
+    
+    if guild_id in welcome_messages:
+        embed.add_field(name="Custom Message", value=welcome_messages[guild_id], inline=False)
+    else:
+        embed.add_field(name="Custom Message", value="Using default message", inline=False)
+    
+    await ctx.send(embed=embed)
+
 # Track which servers already received morning message today
 morning_sent_today = set()
+
+# IST timezone
+IST = pytz.timezone('Asia/Kolkata')
 
 # Morning Message Task - Check every hour
 @tasks.loop(hours=1)
 async def morning_message_task():
-    """Send morning messages at 8:00 AM daily"""
+    """Send morning messages at 8:00 AM IST daily"""
     await bot.wait_until_ready()
     
-    now = datetime.now()
-    current_date = now.date()
+    # Get current time in IST
+    now_utc = datetime.now(pytz.UTC)
+    now_ist = now_utc.astimezone(IST)
+    current_date = now_ist.date()
     
-    # Reset daily tracking at midnight
-    if now.hour == 0:
+    # Reset daily tracking at midnight IST
+    if now_ist.hour == 0:
         morning_sent_today.clear()
     
-    # Send morning messages at 8 AM
-    if now.hour == 8 and now.minute < 1:
-        for guild_id_str, channel_id in morning_channels.items():
+    # Send morning messages at 8 AM IST
+    if now_ist.hour == 8 and now_ist.minute < 1:
+        for key, channel_id in morning_channels.items():
             # Check if we already sent today
-            if guild_id_str in morning_sent_today:
+            if key in morning_sent_today:
                 continue
                 
             try:
@@ -631,21 +802,21 @@ async def morning_message_task():
                 if channel is None:
                     continue
                 
-                guild_id = int(guild_id_str)
-                guild = bot.get_guild(guild_id)
-                if guild is None:
-                    continue
+                # Get guild from channel (works for both guild-based and direct channel IDs)
+                guild = channel.guild if hasattr(channel, 'guild') and channel.guild else None
                 
                 # Get custom message or use default
-                if guild_id_str in morning_messages:
-                    message = morning_messages[guild_id_str]
+                if key in morning_messages:
+                    message = morning_messages[key]
                 else:
                     message = "🌅 Good morning everyone! Have a great day! 🌅"
                 
                 # Send message with @everyone mention
                 await channel.send(f"@everyone {message}")
-                morning_sent_today.add(guild_id_str)
-                print(f"Sent morning message to {guild.name} in {channel.name}")
+                morning_sent_today.add(key)
+                guild_name = guild.name if guild else "Unknown"
+                channel_name = channel.name if hasattr(channel, 'name') else str(channel_id)
+                print(f"Sent morning message to {guild_name} in {channel_name} at {now_ist.strftime('%Y-%m-%d %H:%M:%S IST')}")
             except discord.Forbidden:
                 print(f"No permission to send message in channel {channel_id}")
             except Exception as e:
