@@ -195,6 +195,9 @@ async def on_member_join(member):
         # Get custom welcome message or use default
         if guild_id_str in welcome_messages:
             message = welcome_messages[guild_id_str]
+            # Replace placeholders in custom message
+            message = message.replace("{member}", member.mention)
+            message = message.replace("{guild}", guild.name)
         else:
             message = f"Welcome to {guild.name}, {member.mention}! 🎉 We're glad to have you here!"
         
@@ -206,8 +209,7 @@ async def on_member_join(member):
             timestamp=datetime.utcnow()
         )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Member", value=f"{member.mention} ({member})", inline=True)
-        embed.add_field(name="Member Count", value=guild.member_count, inline=True)
+        embed.add_field(name="Member", value=f"{member.mention} ({member.display_name})", inline=False)
         
         await channel.send(embed=embed)
         print(f"Sent welcome message for {member} in {channel.name}")
