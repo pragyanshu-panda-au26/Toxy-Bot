@@ -199,7 +199,7 @@ async def on_member_join(member):
             message = message.replace("{member}", member.mention)
             message = message.replace("{guild}", guild.name)
         else:
-            message = f"Welcome to {guild.name}, {member.mention}! 🎉 We're glad to have you here!"
+            message = f"Welcome to {guild.name}, {member.mention}! 🎉 We're glad to have you here!  Head over to <#1465456921904414770> to grab your role!"
         
         # Create welcome embed
         embed = discord.Embed(
@@ -976,5 +976,6 @@ if __name__ == "__main__":
         bot.run(TOKEN)          # Then run Discord bot
     else:
         print("❌ No token provided. Exiting...")
+
 
 
